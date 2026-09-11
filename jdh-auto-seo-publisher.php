@@ -55,6 +55,7 @@ class JDH_Auto_SEO_Publisher
         add_action('wp_ajax_jdh_reset_tracker', [$this, 'ajax_reset_tracker']);
         add_action('wp_ajax_jdh_test_router', [$this, 'ajax_test_router']);
         add_action('wp_ajax_jdh_js_cron_check', [$this, 'ajax_js_cron_check']);
+        add_action('wp_ajax_jdh_clear_lock', [$this, 'ajax_clear_lock']);
         add_action('jdh_daily_article_generation', [$this, 'run_daily_task']);
         add_action('init', [$this, 'maybe_schedule_daily_event']);
 
@@ -319,6 +320,12 @@ class JDH_Auto_SEO_Publisher
                         <button id="jdh-batch-btn" class="button button-secondary button-large">Buat Batch</button>
                         <button id="jdh-test-router-btn" class="button">Tes Router</button>
                         <button id="jdh-reset-btn" class="button">Reset Tracker</button>
+                        <button id="jdh-clear-lock-btn" class="button">Clear Lock</button>
+                        <?php
+                        $lock = get_option(self::LOCK_KEY, 0);
+                        if ($lock && (time() - (int) $lock) < self::QUEUED_TIMEOUT_SECONDS): ?>
+                        <p class="jdh-help" style="color:#d63638;">Lock aktif. Proses paralel dicegah. Klik "Clear Lock" jika yakin tidak ada proses berjalan.</p>
+                        <?php endif; ?>
                         <div id="jdh-progress" style="display:none;margin-top:14px;">
                             <div style="height:18px;background:#f0f0f1;border-radius:999px;overflow:hidden;">
                                 <div id="jdh-progress-bar" style="height:100%;width:0%;background:#2271b1;transition:width .25s;"></div>
@@ -477,6 +484,20 @@ class JDH_Auto_SEO_Publisher
                     location.reload();
                 }).finally(function(){ setBusy(false); });
             });
+            var clearLockBtn = document.getElementById('jdh-clear-lock-btn');
+            if (clearLockBtn) {
+                clearLockBtn.addEventListener('click', function(){
+                    if (!confirm('Clear lock? Hanya lakukan ini jika yakin tidak ada proses yang sedang berjalan.')) return;
+                    setBusy(true);
+                    var fd = new FormData();
+                    fd.append('action', 'jdh_clear_lock');
+                    fd.append('nonce', nonce);
+                    fetch(ajaxUrl, {method:'POST', body:fd}).then(function(r){return r.json();}).then(function(data){
+                        alert(data.success ? data.data.msg : 'Gagal clear lock.');
+                        location.reload();
+                    }).finally(function(){ setBusy(false); });
+                });
+            }
         })();
         </script>
         <?php
@@ -3140,6 +3161,13 @@ class JDH_Auto_SEO_Publisher
         $state = $this->get_keyword_state();
         $now = time();
 
+        $has_stale_lock = false;
+        $lock = get_option(self::LOCK_KEY, 0);
+        if ($lock && ($now - (int) $lock) > self::QUEUED_TIMEOUT_SECONDS) {
+            $has_stale_lock = true;
+            $this->release_lock();
+        }
+
         foreach ($keywords as $keyword) {
             $key = $this->normalize_keyword($keyword);
             if (!isset($state[$key]) || !is_array($state[$key])) {
@@ -3417,6 +3445,16 @@ class JDH_Auto_SEO_Publisher
         delete_option(self::KEYWORD_STATE_KEY);
         delete_option(self::JOBS_KEY);
         wp_send_json_success(['msg' => 'Tracker keyword, angle, dan riwayat job berhasil di-reset.']);
+    }
+
+    public function ajax_clear_lock()
+    {
+        check_ajax_referer('jdh_ajax_nonce', 'nonce');
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(['msg' => 'Tidak punya izin.']);
+        }
+        $this->release_lock();
+        wp_send_json_success(['msg' => 'Lock berhasil di-clear. Anda bisa menjalankan proses sekarang.']);
     }
 
     public function ajax_test_router()
