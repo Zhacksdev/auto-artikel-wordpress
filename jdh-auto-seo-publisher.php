@@ -56,6 +56,7 @@ class JDH_Auto_SEO_Publisher
         add_action('wp_ajax_jdh_test_router', [$this, 'ajax_test_router']);
         add_action('wp_ajax_jdh_js_cron_check', [$this, 'ajax_js_cron_check']);
         add_action('wp_ajax_jdh_clear_lock', [$this, 'ajax_clear_lock']);
+        add_action('wp_ajax_jdh_stop_article', [$this, 'ajax_stop_article']);
         add_action('jdh_daily_article_generation', [$this, 'run_daily_task']);
         add_action('init', [$this, 'maybe_schedule_daily_event']);
 
@@ -321,11 +322,33 @@ class JDH_Auto_SEO_Publisher
                         <button id="jdh-test-router-btn" class="button">Tes Router</button>
                         <button id="jdh-reset-btn" class="button">Reset Tracker</button>
                         <button id="jdh-clear-lock-btn" class="button">Clear Lock</button>
+                        <button id="jdh-stop-btn" class="button" disabled>Stop Proses</button>
                         <?php
-                        $lock = get_option(self::LOCK_KEY, 0);
-                        if ($lock && (time() - (int) $lock) < self::QUEUED_TIMEOUT_SECONDS): ?>
-                        <p class="jdh-help" style="color:#d63638;">Lock aktif. Proses paralel dicegah. Klik "Clear Lock" jika yakin tidak ada proses berjalan.</p>
+                        $lock_raw = get_option(self::LOCK_KEY, 0);
+                        $lock_info = is_array($lock_raw) ? $lock_raw : ['time' => is_int($lock_raw) ? $lock_raw : 0, 'job_id' => '', 'keyword' => '', 'angle' => 0, 'stage' => 'unknown', 'started' => ''];
+                        $lock_time = (int) ($lock_info['time'] ?? 0);
+                        $lock_active = $lock_time && (time() - $lock_time) < self::QUEUED_TIMEOUT_SECONDS;
+                        if ($lock_active):
+                            $lock_seconds = time() - $lock_time;
+                            $lock_minutes = (int) floor($lock_seconds / 60);
+                            $lock_stage = esc_html($lock_info['stage'] ?? 'unknown');
+                            $lock_job = esc_html($lock_info['job_id'] ?? '');
+                            $lock_keyword = esc_html($lock_info['keyword'] ?? '');
+                            $lock_started = esc_html($lock_info['started'] ?? '');
+                        ?>
+                        <p class="jdh-help" style="color:#d63638;">
+                            <strong>Lock aktif.</strong> Stage: <code><?php echo $lock_stage; ?></code>
+                            <?php if ($lock_job): ?> | Job: <code><?php echo $lock_job; ?></code><?php endif; ?>
+                            <?php if ($lock_keyword): ?> | Keyword: <code><?php echo $lock_keyword; ?></code><?php endif; ?>
+                            Dimulai: <code><?php echo $lock_started; ?></code> | Umur: <?php echo $lock_minutes; ?> menit
+                            <br>Proses paralel dicegah. Klik "Stop Proses" untuk menghentikan, atau "Clear Lock" jika yakin tidak ada proses berjalan.
+                        </p>
+                        <?php elseif ($lock_time && (time() - $lock_time) >= self::QUEUED_TIMEOUT_SECONDS): ?>
+                        <p class="jdh-help" style="color:#dba617;">Lock kedaluwarsa (> <?php echo self::QUEUED_TIMEOUT_SECONDS / 60; ?> menit). Klik "Clear Lock" untuk mengaturnya ulang, atau "Stop Proses" untuk memastikan.</p>
                         <?php endif; ?>
+                        <div id="jdh-stage-display" style="display:none;margin-top:8px;padding:8px 12px;background:#f0f0f1;border-radius:6px;font-size:13px;">
+                            Stage: <strong id="jdh-current-stage">-</strong>
+                        </div>
                         <div id="jdh-progress" style="display:none;margin-top:14px;">
                             <div style="height:18px;background:#f0f0f1;border-radius:999px;overflow:hidden;">
                                 <div id="jdh-progress-bar" style="height:100%;width:0%;background:#2271b1;transition:width .25s;"></div>
@@ -392,6 +415,7 @@ class JDH_Auto_SEO_Publisher
             var results = document.getElementById('jdh-results');
             var logBox = document.getElementById('jdh-log');
 
+            var stopBtn = document.getElementById('jdh-stop-btn');
             function appendResult(ok, text) {
                 var div = document.createElement('div');
                 div.style.cssText = 'padding:9px 12px;margin:8px 0;border-radius:6px;border-left:4px solid ' + (ok ? '#00a32a' : '#d63638') + ';background:' + (ok ? '#edfaef' : '#fcf0f1') + ';';
@@ -401,13 +425,46 @@ class JDH_Auto_SEO_Publisher
             function appendLog(lines) {
                 if (!lines || !lines.length) return;
                 logBox.style.display = 'block';
-                logBox.textContent += lines.join("\n") + "\n---\n";
+                var ts = new Date().toTimeString().split(' ')[0];
+                var prefixed = lines.map(function(line) {
+                    return '[' + ts + '] ' + line;
+                });
+                logBox.textContent += prefixed.join("\n") + "\n---\n";
                 logBox.scrollTop = logBox.scrollHeight;
             }
             function setBusy(isBusy) {
                 runBtn.disabled = isBusy;
                 batchBtn.disabled = isBusy;
                 resetBtn.disabled = isBusy;
+                testRouterBtn.disabled = isBusy;
+                if (stopBtn) {
+                    stopBtn.disabled = !isBusy;
+                }
+            }
+            function updateStageFromLock(lockInfo) {
+                var stageDisplay = document.getElementById('jdh-stage-display');
+                if (!stageDisplay || !lockInfo) return;
+                var stage = lockInfo.stage || 'unknown';
+                var jobId = lockInfo.job_id || '';
+                var keyword = lockInfo.keyword || '';
+                var text = 'Stage: <strong>' + stage + '</strong>';
+                if (jobId) text += ' | Job: ' + jobId;
+                if (keyword) text += ' | Keyword: ' + keyword;
+                stageDisplay.innerHTML = text;
+                stageDisplay.style.display = 'block';
+            }
+            function refreshLockState() {
+                var fd = new FormData();
+                fd.append('action', 'jdh_ajax_nonce');
+                fd.append('nonce', nonce);
+                fetch(ajaxUrl + '?action=jdh_run_article_check', {method:'POST', body:fd})
+                    .then(function(r){return r.json();})
+                    .then(function(data) {
+                        if (data.lock_info) {
+                            updateStageFromLock(data.lock_info);
+                        }
+                    })
+                    .catch(function(){});
             }
             function runOne(index, total) {
                 progress.style.display = 'block';
@@ -421,6 +478,9 @@ class JDH_Auto_SEO_Publisher
                 return fetch(ajaxUrl, {method:'POST', body:fd})
                     .then(function(r){return r.json();})
                     .then(function(data){
+                        if (data.lock_info) {
+                            updateStageFromLock(data.lock_info);
+                        }
                         if (data.success) {
                             appendResult(true, data.data.msg);
                             appendLog(data.data.logs);
@@ -435,6 +495,8 @@ class JDH_Auto_SEO_Publisher
                 setBusy(true);
                 results.innerHTML = '';
                 logBox.textContent = '';
+                var stageDisplay = document.getElementById('jdh-stage-display');
+                if (stageDisplay) stageDisplay.style.display = 'block';
                 var chain = Promise.resolve();
                 for (var i = 0; i < total; i++) {
                     (function(idx){
@@ -445,6 +507,8 @@ class JDH_Auto_SEO_Publisher
                     progressBar.style.width = '100%';
                     progressText.textContent = 'Selesai.';
                     setBusy(false);
+                    var stageDisplay2 = document.getElementById('jdh-stage-display');
+                    if (stageDisplay2) stageDisplay2.style.display = 'none';
                 });
             }
             runBtn.addEventListener('click', function(){ runBatch(1); });
@@ -498,7 +562,35 @@ class JDH_Auto_SEO_Publisher
                     }).finally(function(){ setBusy(false); });
                 });
             }
-        })();
+            if (stopBtn) {
+                stopBtn.addEventListener('click', function(){
+                    if (!confirm('Stop proses yang sedang berjalan? Lock akan di-release dan job ditandai gagal.')) return;
+                    var fd = new FormData();
+                    fd.append('action', 'jdh_stop_article');
+                    fd.append('nonce', nonce);
+                    fetch(ajaxUrl, {method:'POST', body:fd})
+                        .then(function(r){return r.json();})
+                        .then(function(data){
+                            if (data.success) {
+                                appendResult(false, data.data.msg);
+                                if (data.lock_info) {
+                                    updateStageFromLock(data.lock_info);
+                                }
+                                if (data.stale) {
+                                    appendLog(['INFO: ' + data.msg]);
+                                }
+                                setTimeout(function(){ location.reload(); }, 2000);
+                            } else {
+                                var msg = data.data && data.data.msg ? data.data.msg : 'Gagal stop.';
+                                appendResult(false, msg);
+                            }
+                        })
+                        .catch(function(err){
+                            appendResult(false, 'Error koneksi stop: ' + err.message);
+                        })
+                        .finally(function(){ setBusy(false); });
+                });
+            }
         </script>
         <?php
     }
@@ -807,9 +899,29 @@ class JDH_Auto_SEO_Publisher
         $work = $this->get_next_work_item($options, true);
 
         if (!$work) {
-            $lock = get_option(self::LOCK_KEY, 0);
-            if ($lock && (time() - (int) $lock) < self::QUEUED_TIMEOUT_SECONDS) {
-                wp_send_json_error(['msg' => 'Proses lain sedang berjalan. Coba lagi dalam beberapa menit.', 'logs' => ['Lock aktif, proses paralel dicegah.']]);
+            $lock = $this->get_lock_info();
+            $lock_age = (int) ($lock['time'] ?? 0) ? (time() - (int) $lock['time']) : 0;
+            $lock_seconds = (int) $lock_age;
+            if ($lock_seconds > 0 && $lock_seconds < self::QUEUED_TIMEOUT_SECONDS) {
+                $lock_minutes = (int) floor($lock_seconds / 60);
+                $lock_hours = (int) floor($lock_minutes / 60);
+                $lock_formatted = $lock_hours > 0 ? $lock_hours . ' jam ' . ($lock_minutes % 60) . ' menit' : $lock_minutes . ' menit';
+                $lock_stage = $lock['stage'] ?? 'unknown';
+                $lock_job = $lock['job_id'] ?? '';
+                $lock_keyword = $lock['keyword'] ?? '';
+                $lock_info_text = 'Lock aktif ' . $lock_formatted . ', stage: ' . $lock_stage;
+                if ($lock_job !== '') {
+                    $lock_info_text .= ', job: ' . $lock_job;
+                }
+                if ($lock_keyword !== '') {
+                    $lock_info_text .= ', keyword: ' . $lock_keyword;
+                }
+                $lock_info_text .= '. Masih dalam batas timeout (' . self::QUEUED_TIMEOUT_SECONDS . ' detik).';
+                wp_send_json_error([
+                    'msg' => 'Proses lain sedang berjalan. ' . $lock_info_text,
+                    'logs' => ['Lock aktif, proses paralel dicegah.', $lock_info_text],
+                    'lock_info' => $lock,
+                ]);
             }
             wp_send_json_error(['msg' => 'Tidak ada keyword atau angle yang bisa diproses.', 'logs' => ['Keyword kosong atau semua angle sudah selesai.']]);
         }
@@ -841,6 +953,8 @@ class JDH_Auto_SEO_Publisher
     private function process_article_job($job, $work, $options, &$logs)
     {
         $this->update_job($job['job_id'], ['status' => 'sending_to_router']);
+        $this->update_lock_stage('sending_to_router', $job['job_id'], $work['keyword'], $work['angle_number']);
+        $logs[] = '[STAGE] Kirim ke router: ' . $work['keyword'] . ' / angle ' . $work['angle_number'];
 
         $article = false;
         $last_error = '';
@@ -883,10 +997,13 @@ class JDH_Auto_SEO_Publisher
         if (!$article) {
             $this->update_job($job['job_id'], ['status' => 'failed', 'error_message' => $last_error]);
             $this->mark_angle_failed($work['keyword'], $work['angle_number'], $last_error);
+            $this->update_lock_stage('failed', $job['job_id'], $work['keyword'], $work['angle_number']);
             return ['success' => false, 'message' => $last_error ?: 'Gagal membuat artikel setelah retry.'];
         }
 
         $this->update_job($job['job_id'], ['status' => 'image_processing', 'router_response' => $article]);
+        $this->update_lock_stage('image_processing', $job['job_id'], $work['keyword'], $work['angle_number']);
+        $logs[] = '[STAGE] Proses gambar: ' . $work['keyword'];
         $image_id = 0;
         for ($image_attempt = 1; $image_attempt <= self::MAX_IMAGE_RETRY; $image_attempt++) {
             $logs[] = "Featured image attempt {$image_attempt}/" . self::MAX_IMAGE_RETRY . '.';
@@ -903,10 +1020,13 @@ class JDH_Auto_SEO_Publisher
             $logs[] = $error;
             $this->update_job($job['job_id'], ['status' => 'failed', 'error_message' => $error]);
             $this->mark_angle_failed($work['keyword'], $work['angle_number'], $error);
+            $this->update_lock_stage('failed', $job['job_id'], $work['keyword'], $work['angle_number']);
             return ['success' => false, 'message' => $error];
         }
 
         $this->update_job($job['job_id'], ['status' => 'publishing']);
+        $this->update_lock_stage('publishing', $job['job_id'], $work['keyword'], $work['angle_number']);
+        $logs[] = '[STAGE] Publish: ' . $work['keyword'];
         $post_id = $this->publish_article($article, $work, $options, $image_id, $logs);
         if (!$post_id || is_wp_error($post_id)) {
             $error = is_wp_error($post_id) ? $post_id->get_error_message() : 'wp_insert_post gagal.';
@@ -917,6 +1037,8 @@ class JDH_Auto_SEO_Publisher
 
         $this->mark_angle_published($work['keyword'], $work['angle_number'], $post_id, $article);
         $this->update_job($job['job_id'], ['status' => 'done', 'post_id' => $post_id, 'error_message' => '']);
+        $this->update_lock_stage('done', $job['job_id'], $work['keyword'], $work['angle_number']);
+        $logs[] = '[STAGE] Selesai: ' . $work['keyword'] . ' → Post ID ' . $post_id;
 
         if (($options['auto_index_google'] ?? '1') === '1') {
             $this->verify_sitemap_readiness($logs, $post_id);
@@ -932,27 +1054,59 @@ class JDH_Auto_SEO_Publisher
 
     private function process_article_job_safely($job, $work, $options, &$logs)
     {
+        $job_id = $this->scalar_string($job['job_id'] ?? '');
+        $keyword = $this->scalar_string($work['keyword'] ?? '');
+        $angle = $this->scalar_int($work['angle_number'], 0);
+
+        $this->update_lock_stage('locked', $job_id, $keyword, $angle);
+
+        $shutdown_done = false;
+        register_shutdown_function(static function () use ($job_id, $keyword, $angle, &$shutdown_done, &$logs) {
+            if ($shutdown_done) {
+                return;
+            }
+            $error = error_get_last();
+            $is_fatal = $error !== null && in_array($error['type'], [E_ERROR, E_CORE_ERROR, E_COMPILE_ERROR, E_PARSE], true);
+            $message = 'Proses dihentikan karena kesalahan internal.';
+            if ($is_fatal) {
+                $message = 'Proses berhenti mendadak (fatal): ' . ($error['message'] ?? 'unknown');
+            }
+            $logs[] = 'SHUTDOWN: ' . $message;
+            if ($job_id !== '') {
+                $plugin = new self();
+                $plugin->update_job($job_id, ['status' => 'failed', 'error_message' => sanitize_text_field($message)]);
+                $plugin->mark_angle_failed($keyword, $angle, $message);
+            }
+            $plugin->release_lock();
+        });
+
         try {
+            $logs[] = '[LOCK] Lock di-acquire, stage: locked.';
+
             $result = $this->process_article_job($job, $work, $options, $logs);
+
+            $shutdown_done = true;
             $this->send_telegram_job_notification($job, $work, $options, $result, $logs);
             $this->release_lock();
+            $logs[] = '[LOCK] Lock di-release. Proses selesai.';
             return $result;
         } catch (Throwable $error) {
             $detail = sanitize_text_field(wp_strip_all_tags($error->getMessage()));
             $message = $detail !== '' ? 'Proses dihentikan aman: ' . $detail : 'Proses dihentikan karena kesalahan internal.';
-            $logs[] = $message;
+            $logs[] = '[ERROR] ' . $message;
 
-            $job_id = $this->scalar_string($job['job_id'] ?? '');
             if ($job_id !== '') {
                 $this->update_job($job_id, ['status' => 'failed', 'error_message' => $message]);
             }
-            if (!empty($work['keyword']) && !empty($work['angle_number'])) {
-                $this->mark_angle_failed($work['keyword'], $work['angle_number'], $message);
+            if ($keyword !== '' && $angle > 0) {
+                $this->mark_angle_failed($keyword, $angle, $message);
             }
 
             $result = ['success' => false, 'message' => $message];
             $this->send_telegram_job_notification($job, $work, $options, $result, $logs);
+            $shutdown_done = true;
             $this->release_lock();
+            $logs[] = '[LOCK] Lock di-release setelah exception.';
             return $result;
         }
     }
@@ -3137,12 +3291,63 @@ class JDH_Auto_SEO_Publisher
 
     private function acquire_lock()
     {
-        $lock = get_option(self::LOCK_KEY, 0);
-        if ($lock && (time() - (int) $lock) < self::QUEUED_TIMEOUT_SECONDS) {
+        $lock = $this->get_lock_info();
+        $lock_time = (int) ($lock['time'] ?? 0);
+        if ($lock_time && (time() - $lock_time) < self::QUEUED_TIMEOUT_SECONDS) {
             return false;
         }
-        update_option(self::LOCK_KEY, time(), false);
+        update_option(self::LOCK_KEY, [
+            'time' => time(),
+            'job_id' => '',
+            'keyword' => '',
+            'angle' => 0,
+            'stage' => 'locked',
+            'started' => current_time('mysql'),
+        ]);
         return true;
+    }
+
+    private function get_lock_info()
+    {
+        $lock = get_option(self::LOCK_KEY, 0);
+        if (is_array($lock)) {
+            return array_merge([
+                'time' => 0,
+                'job_id' => '',
+                'keyword' => '',
+                'angle' => 0,
+                'stage' => 'unknown',
+                'started' => '',
+            ], $lock);
+        }
+        return [
+            'time' => (int) $lock,
+            'job_id' => '',
+            'keyword' => '',
+            'angle' => 0,
+            'stage' => 'unknown',
+            'started' => '',
+        ];
+    }
+
+    private function update_lock_stage($stage, $job_id = '', $keyword = '', $angle = 0)
+    {
+        $lock = $this->get_lock_info();
+        if ($job_id !== '') {
+            $lock['job_id'] = $job_id;
+        }
+        if ($keyword !== '') {
+            $lock['keyword'] = $keyword;
+        }
+        if ($angle > 0) {
+            $lock['angle'] = (int) $angle;
+        }
+        $lock['stage'] = $stage;
+        $lock['time'] = time();
+        if ($lock['started'] === '') {
+            $lock['started'] = current_time('mysql');
+        }
+        update_option(self::LOCK_KEY, $lock);
     }
 
     private function release_lock()
@@ -3162,8 +3367,9 @@ class JDH_Auto_SEO_Publisher
         $now = time();
 
         $has_stale_lock = false;
-        $lock = get_option(self::LOCK_KEY, 0);
-        if ($lock && ($now - (int) $lock) > self::QUEUED_TIMEOUT_SECONDS) {
+        $lock = $this->get_lock_info();
+        $lock_time = (int) ($lock['time'] ?? 0);
+        if ($lock_time && ($now - $lock_time) > self::QUEUED_TIMEOUT_SECONDS) {
             $has_stale_lock = true;
             $this->release_lock();
         }
@@ -3455,6 +3661,48 @@ class JDH_Auto_SEO_Publisher
         }
         $this->release_lock();
         wp_send_json_success(['msg' => 'Lock berhasil di-clear. Anda bisa menjalankan proses sekarang.']);
+    }
+
+    public function ajax_stop_article()
+    {
+        check_ajax_referer('jdh_ajax_nonce', 'nonce');
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(['msg' => 'Tidak punya izin.']);
+        }
+
+        $lock = $this->get_lock_info();
+        $is_stale = !$lock['time'] || (time() - (int) $lock['time']) >= self::QUEUED_TIMEOUT_SECONDS;
+
+        if ($is_stale) {
+            $this->release_lock();
+            wp_send_json_success([
+                'msg' => 'Lock sudah kedaluwarsa (lock idle > ' . (self::QUEUED_TIMEOUT_SECONDS / 60) . ' menit). Lock di-clear otomatis.',
+                'stale' => true,
+                'lock_info' => $lock,
+            ]);
+            return;
+        }
+
+        $job_id = $lock['job_id'] ?? '';
+        $keyword = $lock['keyword'] ?? '';
+        $angle = (int) ($lock['angle'] ?? 0);
+
+        if ($job_id !== '') {
+            $this->update_job($job_id, [
+                'status' => 'failed',
+                'error_message' => 'Dihentikan oleh admin (Stop). ' . current_time('mysql'),
+            ]);
+        }
+        if ($keyword !== '' && $angle > 0) {
+            $this->mark_angle_failed($keyword, $angle, 'Dihentikan oleh admin (Stop).');
+        }
+
+        $this->release_lock();
+        wp_send_json_success([
+            'msg' => 'Proses dihentikan. Lock di-release dan job ditandai gagal.',
+            'stale' => false,
+            'lock_info' => $lock,
+        ]);
     }
 
     public function ajax_test_router()

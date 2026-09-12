@@ -518,6 +518,27 @@ jdh_assert(!empty($jobs[0]['post_id']), 'Cron end-to-end job did not publish a p
 jdh_assert(get_post_thumbnail_id($jobs[0]['post_id']) > 0, 'Cron published a post without featured image.');
 jdh_assert(in_array('Artikel', $GLOBALS['jdh_test_requested_models'], true), 'Writing requests did not send the Artikel combo ID.');
 
+$GLOBALS['jdh_test_options'][JDH_Auto_SEO_Publisher::LOCK_KEY] = 1700000000;
+$legacy_lock = $invoke('get_lock_info');
+jdh_assert(($legacy_lock['time'] ?? 0) === 1700000000, 'Legacy integer lock was not read as lock info.');
+jdh_assert(($legacy_lock['stage'] ?? '') === 'unknown', 'Legacy lock info missing default stage.');
+
+$GLOBALS['jdh_test_options'][JDH_Auto_SEO_Publisher::LOCK_KEY] = ['time' => 1700000000, 'stage' => 'publishing', 'job_id' => 'jdh_test', 'keyword' => 'ACP Indonesia', 'angle' => 2, 'started' => '2026-07-11 12:00:00'];
+$array_lock = $invoke('get_lock_info');
+jdh_assert(($array_lock['stage'] ?? '') === 'publishing' && ($array_lock['job_id'] ?? '') === 'jdh_test', 'Array lock info was not preserved.');
+
+$GLOBALS['jdh_test_options'][JDH_Auto_SEO_Publisher::LOCK_KEY] = 0;
+jdh_assert($invoke('acquire_lock') === true, 'Acquiring a free lock must succeed.');
+$acquired_lock = $invoke('get_lock_info');
+jdh_assert(is_array($acquired_lock) && ($acquired_lock['stage'] ?? '') === 'locked' && ($acquired_lock['time'] ?? 0) > 0, 'Acquired lock must store stage metadata as an array.');
+jdh_assert($invoke('acquire_lock') === false, 'Acquiring an already-held lock must fail.');
+
+$invoke('update_lock_stage', ['image_processing', 'jdh_x', 'KW', 1]);
+$updated_lock = $invoke('get_lock_info');
+jdh_assert(($updated_lock['stage'] ?? '') === 'image_processing' && ($updated_lock['job_id'] ?? '') === 'jdh_x', 'update_lock_stage did not update metadata.');
+$invoke('release_lock');
+jdh_assert(($invoke('get_lock_info')['time'] ?? 0) === 0, 'release_lock did not clear the lock.');
+
 echo 'PASS runtime-smoke version=' . JDH_Auto_SEO_Publisher::VERSION
     . ' words=' . $invoke('count_words', [$article['content_html']])
-    . ' h2=8 faq=4 featured=required cron=done warnings=0' . PHP_EOL;
+    . ' h2=8 faq=4 featured=required cron=done warnings=0 lock=ok' . PHP_EOL;
