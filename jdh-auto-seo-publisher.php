@@ -591,6 +591,7 @@ class JDH_Auto_SEO_Publisher
                         .finally(function(){ setBusy(false); });
                 });
             }
+        })();
         </script>
         <?php
     }
